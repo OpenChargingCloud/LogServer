@@ -383,6 +383,14 @@ namespace cloud.charging.open.LogServer
             if (Changed.Change != SftpAreaChange.PutInPlace)
                 return;
 
+            // An upload under the name it goes by until its last byte is there -
+            // "<name>.part", as the white paper "SFTP for Logfile Uploads and
+            // Firmware Downloads" has it - is not done yet: its uploader renames
+            // it next, and that rename is what is taken in. Taken in now, the
+            // rename would find nothing, and the upload would fail.
+            if (Changed.Name.EndsWith(SFTPLocation.PartSuffix, StringComparison.OrdinalIgnoreCase))
+                return;
+
             var uploader = Changed.Account.Id.ToString();
 
             try
