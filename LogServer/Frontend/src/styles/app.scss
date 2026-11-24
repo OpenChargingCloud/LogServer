@@ -1,0 +1,163 @@
+// The web interface of a log server. What every node shows alike - the frame,
+// the forms, sign-in, logs, DNS, NTS, pins, the certificate store, a commit on
+// the Configuration page - is WWCP_Node's, in the log server's colour - the
+// violet of an archive; what follows is what only its own pages need.
+@use '@node/styles/node' as * with (
+    $color-accent:       #6b4c9a,
+    $color-accent-dark:  #533a78
+);
+
+
+// The filters above the uploads: no form, a choice each that asks at once.
+.upload-filters {
+
+    display:      flex;
+    flex-wrap:    wrap;
+    gap:          0.75rem 1.25rem;
+    align-items:  flex-end;
+    margin:       0.25rem 0 0.5rem;
+
+    label {
+        display:         flex;
+        flex-direction:  column;
+        gap:             0.2rem;
+        font-size:       0.8rem;
+        color:           $color-muted;
+    }
+
+    select {
+        min-width:  12rem;
+    }
+
+}
+
+// A button that reads as a link: a name in the list that filters by it, and
+// the heading of the time column that turns the order around.
+button.link {
+
+    background:   none;
+    border:       none;
+    padding:      0;
+    font:         inherit;
+    color:        $color-accent;
+    cursor:       pointer;
+    text-align:   left;
+
+    &:hover,
+    &:focus-visible {
+        text-decoration:  underline;
+    }
+
+    &.sort {
+        color:        inherit;
+        font-weight:  600;
+    }
+
+}
+
+// The uploads: a row each, opened for what else is known of it.
+table.records.uploads {
+
+    tr.upload {
+        cursor: pointer;
+
+        &:hover td {
+            background: rgba($color-accent, 0.04);
+        }
+
+        &.opened td {
+            border-bottom-color: transparent;
+        }
+    }
+
+    td.upload-file,
+    td.upload-station,
+    td.upload-uploader {
+        font-family:    $font-mono;
+        overflow-wrap:  anywhere;
+        white-space:    normal;
+    }
+
+    td.upload-from {
+        font-family:  $font-mono;
+        font-size:    0.78rem;
+        color:        $color-muted;
+    }
+
+    td.upload-time .muted {
+        display:    block;
+        font-size:  0.75rem;
+    }
+
+    td.upload-actions {
+        white-space:  nowrap;
+        text-align:   right;
+
+        .btn + .btn {
+            margin-left: 0.25rem;
+        }
+    }
+
+    tr.upload-details td {
+        background:  rgba($color-accent, 0.04);
+        white-space: normal;
+
+        code {
+            overflow-wrap: anywhere;
+        }
+    }
+
+}
+
+// A column after one drawn against its right edge - a size, a count - kept
+// clear of it.
+table.records.uploads,
+table.records.uploaders {
+    th.right + th,
+    td.right + td {
+        padding-left: 1rem;
+    }
+}
+
+table.records.uploaders td.record-actions {
+    white-space:  nowrap;
+    text-align:   right;
+}
+
+// The password just made, to be copied as one.
+.password-shown {
+
+    display:      flex;
+    flex-wrap:    wrap;
+    gap:          0.5rem;
+    align-items:  center;
+
+    code {
+        font-family:    $font-mono;
+        font-size:      1rem;
+        padding:        0.35rem 0.6rem;
+        border:         1px solid $color-border;
+        border-radius:  $radius;
+        background:     $color-bg;
+        user-select:    all;
+    }
+
+}
+
+// The line a charging station is given, to be copied as one.
+pre.ask-with {
+
+    font-family:    $font-mono;
+    font-size:      0.8rem;
+    background:     $color-bg;
+    border:         1px solid $color-border;
+    border-radius:  $radius;
+    padding:        0.6rem;
+    overflow-x:     auto;
+    margin:         0.5rem 0 0;
+
+}
+
+.hint.warn-line {
+    color: #92400e;
+}
