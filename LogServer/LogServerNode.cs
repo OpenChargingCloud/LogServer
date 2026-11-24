@@ -321,6 +321,10 @@ namespace cloud.charging.open.LogServer
 
                 AddSftpArea(this.SftpArea);
 
+                // Nobody uploads before the node is started: whatever is left
+                // under "<name>.part" is an upload that was never finished.
+                ForgetUnfinishedSftpUploads(OlderThan: TimeSpan.Zero);
+
             }
 
             #endregion
@@ -380,6 +384,9 @@ namespace cloud.charging.open.LogServer
         private void TakeInSftpUpload(SftpAreaChanged Changed)
         {
 
+            // What uploads that were never finished left, as anything moves.
+            ForgetUnfinishedSftpUploads(OlderThan: UnfinishedSftpUploadsKeptFor);
+
             if (Changed.Change != SftpAreaChange.PutInPlace)
                 return;
 
@@ -411,6 +418,52 @@ namespace cloud.charging.open.LogServer
             {
                 Log.Error($"What '{uploader}' uploaded over SFTP as '{Changed.Name}' could not be kept: {problem.Message}",
                           "logserver", "uploads", "sftp");
+            }
+
+        }
+
+        #endregion
+
+
+        #region UnfinishedSftpUploadsKeptFor / (private) ForgetUnfinishedSftpUploads(OlderThan)
+
+        /// <summary>
+        /// How long a file under "&lt;name&gt;.part" that was never renamed is
+        /// kept while the log server runs: a day - an upload on a slow line
+        /// takes long, and one left for a day is one its uploader gave up.
+        /// </summary>
+        public TimeSpan UnfinishedSftpUploadsKeptFor { get; set; } = TimeSpan.FromDays(1);
+
+        /// <summary>
+        /// Take away what uploads over SFTP left under "&lt;name&gt;.part" and
+        /// never renamed, where it was last written longer ago than given: it
+        /// is never taken in, and would lie there for ever.
+        /// </summary>
+        private void ForgetUnfinishedSftpUploads(TimeSpan OlderThan)
+        {
+
+            if (SftpArea is null || !Directory.Exists(SftpArea.Directory))
+                return;
+
+            var before = TimeProvider.GetUtcNow() - OlderThan;
+
+            foreach (var part in Directory.EnumerateFiles(SftpArea.Directory, "*" + SFTPLocation.PartSuffix))
+            {
+                try
+                {
+
+                    if (File.GetLastWriteTimeUtc(part) > before.UtcDateTime && OlderThan > TimeSpan.Zero)
+                        continue;
+
+                    File.Delete(part);
+
+                    Log.Notice($"'{Path.GetFileName(part)}' was taken away: an upload over SFTP that was never finished.", "logserver", "uploads", "sftp");
+
+                }
+                catch (Exception problem) when (problem is IOException or UnauthorizedAccessException)
+                {
+                    Log.Warning($"What an unfinished upload left in '{part}' could not be taken away: {problem.Message}", "logserver", "uploads", "sftp");
+                }
             }
 
         }
