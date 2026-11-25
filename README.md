@@ -1,5 +1,7 @@
 # LogServer
 
+![The EV charging test environment, the log server (Log) highlighted](docs/EVChargingTestEnvironment.svg)
+
 The log server for charging stations as a [WWCP_Node](https://github.com/OpenChargingCloud/WWCP_Node):
 it takes the log files charging stations upload - by HTTP PUT on a port of its
 own, and over SFTP on the node's SSH server - keeps each of them with what is
