@@ -25,12 +25,28 @@ export function sizeOf(Bytes: number): string {
 
 }
 
+/** A number of seconds as somebody reads it: "45 s", "30 min", "1 h", "1 h 30 min". */
+export function durationOf(Seconds: number): string {
+
+    if (!Number.isFinite(Seconds) || Seconds < 0)
+        return '-';
+
+    if (Seconds < 60)
+        return `${Math.round(Seconds)} s`;
+
+    const minutes = Math.round(Seconds / 60);
+
+    if (minutes < 60)
+        return `${minutes} min`;
+
+    const hours = Math.floor(minutes / 60);
+    const rest  = minutes % 60;
+
+    return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+
+}
+
 /** Where this web interface was reached at: what a charging station would be told to upload to, failing a better name. */
 export function thisHost(): string {
     return typeof location !== 'undefined' && location.hostname.length > 0 ? location.hostname : 'logs.example.org';
-}
-
-/** The host of a URL the node gave, with the host a browser reached it at in place of "any". */
-export function reachableURL(URLText: string): string {
-    return URLText.replace('://any:', `://${thisHost()}:`);
 }

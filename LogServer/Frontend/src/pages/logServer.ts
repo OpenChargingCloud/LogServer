@@ -1,5 +1,5 @@
 import { api, type LogServerStatus } from '../api/client';
-import { reachableURL, sizeOf, thisHost } from '../format';
+import { durationOf, sizeOf, thisHost } from '../format';
 import type { Page } from '@node/router';
 import { reloadButton, shell } from '@node/shell';
 import { errorMessage, formatSince, formatTimestamp } from '@node/ui';
@@ -43,22 +43,39 @@ export const logServerPage: Page = {
                     </section>
                 `;
 
-            const url = reachableURL(http.url);
+            // What charging stations are told: "publicURL", or the log server's
+            // guess - the same the banner says.
+            const url          = http.url;
+            const behindProxy  = !http.tls && url.startsWith('https:');
+            const certificate  = http.certificate;
 
             return html`
                 <section class="card" id="http-uploads">
 
                     <h2><i class="fa-solid fa-upload"></i> HTTP uploads
                         <span class="chip ${http.listening ? 'ok' : 'bad'}">${http.listening ? 'listening' : 'not listening'}</span>
-                        ${http.tls ? html`<span class="chip on">TLS</span>` : html`<span class="chip warn">plain HTTP</span>`}
+                        ${http.tls          ? html`<span class="chip on">TLS</span>`
+                        : behindProxy       ? html`<span class="chip">TLS at a proxy</span>`
+                        :                     html`<span class="chip warn">plain HTTP</span>`}
                     </h2>
 
                     <div class="kv-list">
-                        <div class="kv"><span class="k">Upload to</span><span class="v"><code>${url}&lt;charging station&gt;/&lt;file name&gt;</code></span></div>
+                        <div class="kv"><span class="k">Upload to</span><span class="v"><code>${url}&lt;charging station&gt;/&lt;file name&gt;</code>
+                            ${http.publicURL === null ? html` <span class="muted">(guessed - "publicURL" says it)</span>` : nothing}</span></div>
+                        <div class="kv"><span class="k">Listening on</span><span class="v"><code>${http.listen}</code></span></div>
+                        ${certificate === null ? nothing : html`
+                            <div class="kv"><span class="k">Certificate</span><span class="v">${certificate.shows === null
+                                ? html`<strong>none to show</strong> - every connection is refused: ${certificate.problem}`
+                                : html`${certificate.shows}, until ${formatTimestamp(certificate.notAfter ?? '')},
+                                       <span class="muted">from ${certificate.certificate === 'store'
+                                           ? `the certificate store${certificate.label !== null ? ` ('${certificate.label}')` : ''}`
+                                           : certificate.fullchain}</span>`}</span></div>
+                        `}
                         <div class="kv"><span class="k">Signed in</span><span class="v">${http.anonymous
                             ? html`with the credentials of an uploader - or <strong>without any</strong>: "anonymousHTTP" is true`
                             : 'with the credentials of an uploader, by HTTP Basic Auth'}</span></div>
-                        <div class="kv"><span class="k">Largest file</span><span class="v">${sizeOf(Status.maxFileSize)}</span></div>
+                        <div class="kv"><span class="k">Largest file</span><span class="v">${sizeOf(Status.maxFileSize)}, written to the disk as it arrives</span></div>
+                        <div class="kv"><span class="k">Longest upload</span><span class="v">${durationOf(http.timeout)}</span></div>
                         <div class="kv"><span class="k">Refused</span><span class="v">${http.refused} since the start</span></div>
                     </div>
 
@@ -71,11 +88,11 @@ export const logServerPage: Page = {
                     <p class="hint">Or, to try it by hand:</p>
                     <pre class="ask-with">curl -u CS001:&lt;password&gt; -T diagnostics.zip ${url}CS001/diagnostics.zip</pre>
 
-                    ${http.tls ? nothing : html`
+                    ${http.tls || behindProxy ? nothing : html`
                         <p class="hint warn-line">
-                            Over plain HTTP the file and the password cross the network in the clear. Give the web
-                            interface a certificate ("web.tls"), which the upload port shows as well, or put a proxy
-                            that speaks TLS in front.
+                            Over plain HTTP the file and the password cross the network in the clear. Give the upload
+                            port a certificate of its own ("logServer.tls"), or put a proxy that speaks TLS in front
+                            and say its "https" URL in "logServer.publicURL".
                         </p>
                     `}
 
@@ -122,7 +139,8 @@ export const logServerPage: Page = {
 
                     <p class="hint">
                         The charging station is the uploader it signs in as. Every file put in ${sftp.path} is taken in
-                        at once, so that the next one of the same name never takes its place.
+                        at once, so that the next one of the same name never takes its place - but for one put as
+                        "&lt;name&gt;.part", which is taken in when it is renamed to "&lt;name&gt;" after its last byte.
                     </p>
                     <pre class="ask-with">sftp -P ${port} CS001@${thisHost()}
 sftp&gt; put diagnostics.zip ${sftp.path}/</pre>

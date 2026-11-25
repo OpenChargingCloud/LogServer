@@ -116,6 +116,19 @@ namespace cloud.charging.open.LogServer
         public const                String    SftpIncoming      = ".sftp-incoming";
 
         /// <summary>
+        /// The directory below the uploads an HTTP upload is written to as it
+        /// arrives, until its last byte is there and it is taken into the
+        /// store: hidden, and no name a charging station's directory can have.
+        /// </summary>
+        public const                String    HTTPIncoming      = ".http-incoming";
+
+        /// <summary>
+        /// The listeners of the node's certificate store a TLS server identity
+        /// may be told it is shown on: the web interface, and the upload port.
+        /// </summary>
+        public static readonly      IReadOnlyList<String>  CertificateListeners  = [ WebServerCertificate.Listener, LogServerSettings.UploadListener ];
+
+        /// <summary>
         /// The manifest resource prefix of the embedded web interface (see the
         /// EmbedFrontend target of LogServer.csproj).
         /// </summary>
@@ -155,10 +168,31 @@ namespace cloud.charging.open.LogServer
         public SftpArea?          SftpArea          { get; }
 
         /// <summary>
-        /// Whether the upload port speaks TLS - with the web interface's
-        /// certificate, where the node shows one there.
+        /// The certificate the upload port shows - its own, where the section
+        /// says "tls" - or null for plain HTTP.
         /// </summary>
-        public Boolean            UploadsOverHTTPS  { get; }
+        public UploadPortCertificate?  UploadCertificate  { get; }
+
+        /// <summary>
+        /// Whether the upload port speaks TLS.
+        /// </summary>
+        public Boolean            UploadsOverHTTPS
+            => UploadCertificate is not null;
+
+        /// <summary>
+        /// The root of the upload port as charging stations are told it: what
+        /// "publicURL" says, or - failing that - guessed from where the port
+        /// listens: the address it is given, or the name of this machine where
+        /// it listens on every address.
+        /// </summary>
+        public Uri                UploadURL
+            => Settings.PublicURL ?? new Uri($"{(UploadsOverHTTPS ? "https" : "http")}://{GuessedHost()}:{Settings.HTTPPort}/");
+
+        /// <summary>
+        /// Where the upload port listens, as a URL: "http://any:8363/".
+        /// </summary>
+        public String             UploadListenURL
+            => $"{(UploadsOverHTTPS ? "https" : "http")}://{LogServerSettings.TextOf(Settings.HTTPListen)}:{Settings.HTTPPort}/";
 
         /// <summary>
         /// How many HTTP uploads were turned away since the start.
@@ -231,6 +265,7 @@ namespace cloud.charging.open.LogServer
                    Frontend:              Frontend ?? new EmbeddedContentSource(HTTPRoot, typeof(LogServerNode).Assembly),
                    CertificatesPath:      CertificatesPath,
                    CertificateKinds:      CertificateKinds,
+                   CertificateListeners:  CertificateListeners,
                    Log:                   Log,
                    LogToConsole:          LogToConsole,
                    ConsoleLogLevel:       ConsoleLogLevel,
@@ -273,27 +308,44 @@ namespace cloud.charging.open.LogServer
             if (Settings.HTTP)
             {
 
-                // With the web interface's certificate, where it shows one: a
-                // charging station's log is no less private than a browser's
-                // page, and one certificate to renew is one thing to forget less.
-                var certificate         = WebCertificate;
+                // A certificate of its own, and not the web interface's: the
+                // upload port is reached by charging stations under a name of
+                // their network, the web interface by people under another -
+                // and either may speak TLS without the other.
+                if (Settings.TLS is WebTLSConfiguration tls)
+                    this.UploadCertificate  = new UploadPortCertificate(
+                                                  (tls.Certificate ?? WebCertificateSource.Store).Beside(this.ConfigFile.Path),
+                                                  ListenerCertificates.For(LogServerSettings.UploadListener, "the upload port"),
+                                                  this.Log
+                                              );
 
-                this.UploadsOverHTTPS   = certificate is not null;
+                var certificate             = this.UploadCertificate;
 
-                this.UploadServer       = new HTTPServer(
-                                              IPAddress:                  Settings.HTTPListen,
-                                              TCPPort:                    Settings.HTTPPort,
-                                              HTTPServerName:             $"OpenChargingCloud {Kind.Product} v{this.Version}",
-                                              ServerCertificateSelector:  certificate is not null
-                                                                              ? (server, client) => certificate.ChainFor(server, client).Certificate
-                                                                              : null,
-                                              MaxHTTPBodySize:            (UInt64) Settings.MaxFileSize
-                                          );
+                // An HTTP server of its own, on a port of its own. The body of a
+                // PUT is never held in memory: Hermod hands it over as a stream,
+                // which is written to the disk as it arrives - see PutUpload -
+                // so the largest file costs no more memory than the smallest.
+                // How long it may take is the section's, not Hermod's half
+                // minute, which a large file over a slow line does not make.
+                this.UploadServer           = new HTTPServer(
+                                                  IPAddress:                  Settings.HTTPListen,
+                                                  TCPPort:                    Settings.HTTPPort,
+                                                  HTTPServerName:             $"OpenChargingCloud {Kind.Product} v{this.Version}",
+                                                  ServerCertificateSelector:  certificate is not null
+                                                                                  ? (server, client) => certificate.ChainFor(server, client).Certificate
+                                                                                  : null,
+                                                  MaxHTTPBodySize:            (UInt64) Settings.MaxFileSize,
+                                                  BodyReadTimeout:            Settings.HTTPUploadTimeout
+                                              );
 
                 if (certificate is not null)
                     this.UploadServer.ServerCertificateChainSelector = certificate.ChainFor;
 
                 RegisterHTTPUploads(this.UploadServer);
+
+                // Nobody uploads before the node is started: whatever lies in
+                // the directory an HTTP upload is written to is one that broke off.
+                ForgetUnfinishedHTTPUploads();
 
             }
 
@@ -471,6 +523,75 @@ namespace cloud.charging.open.LogServer
         #endregion
 
 
+        #region (private) GuessedHost()
+
+        /// <summary>
+        /// The host a charging station would be told where nobody said: the
+        /// address the upload port listens on, or the name of this machine
+        /// where it listens on every address.
+        /// </summary>
+        private String GuessedHost()
+        {
+
+            if (!Settings.HTTPListen.TryGetValue(out IPvXAddress _))
+            {
+                var address = Settings.HTTPListen.ToString();
+                return address.Contains(':') && !address.StartsWith('[')
+                           ? $"[{address}]"
+                           : address;
+            }
+
+            try
+            {
+                var name = System.Net.Dns.GetHostName();
+                if (!String.IsNullOrWhiteSpace(name))
+                    return name.ToLowerInvariant();
+            }
+            catch (SocketException)
+            { }
+
+            return "localhost";
+
+        }
+
+        #endregion
+
+        #region (private) HTTPIncomingDirectory / ForgetUnfinishedHTTPUploads()
+
+        /// <summary>
+        /// Where an HTTP upload is written to as it arrives.
+        /// </summary>
+        private String HTTPIncomingDirectory
+            => Path.Combine(Uploads.Directory, HTTPIncoming);
+
+        /// <summary>
+        /// Take away whatever HTTP uploads that broke off left: at the start,
+        /// when no upload can be under way.
+        /// </summary>
+        private void ForgetUnfinishedHTTPUploads()
+        {
+
+            if (!Directory.Exists(HTTPIncomingDirectory))
+                return;
+
+            foreach (var part in Directory.EnumerateFiles(HTTPIncomingDirectory))
+            {
+                try
+                {
+                    File.Delete(part);
+                    Log.Notice($"'{Path.GetFileName(part)}' was taken away: an upload by HTTP that broke off.", "logserver", "uploads", "http");
+                }
+                catch (Exception problem) when (problem is IOException or UnauthorizedAccessException)
+                {
+                    Log.Warning($"What an HTTP upload that broke off left in '{part}' could not be taken away: {problem.Message}", "logserver", "uploads", "http");
+                }
+            }
+
+        }
+
+        #endregion
+
+
         #region (protected override) OnListening()
 
         /// <summary>
@@ -504,10 +625,16 @@ namespace cloud.charging.open.LogServer
 
             Log.Notice($"Uploads are taken {ListenersText()}; {Uploads.Count} are kept in '{Uploads.Directory}'.", "logserver");
 
-            if (UploadServer is not null && !UploadsOverHTTPS)
+            // Not where the URL charging stations are told is "https": then a
+            // proxy in front speaks TLS, and plain HTTP behind it is its business.
+            if (UploadServer is not null && !UploadsOverHTTPS && UploadURL.Scheme != Uri.UriSchemeHttps)
                 Log.Warning($"HTTP uploads are taken over plain HTTP: what a charging station sends, and the password it signs in with, cross the network in the clear. " +
-                            $"Give the web interface a certificate (\"web.tls\"), which the upload port then shows as well, or put a proxy that speaks TLS in front.",
+                            $"Give the upload port a certificate (\"{LogServerSettings.SectionName}.tls\", or --upload-https), or put a proxy that speaks TLS in front and tell \"{LogServerSettings.SectionName}.publicURL\" its \"https\" URL.",
                             "logserver", "http", "security");
+
+            if (UploadServer is not null && Settings.PublicURL is null && Settings.HTTPListen.TryGetValue(out IPvXAddress _))
+                Log.Info($"Charging stations are told to upload to {UploadURL}, a guess from the name of this machine: where they know it by another name, say it in \"{LogServerSettings.SectionName}.publicURL\" (or --upload-url).",
+                         "logserver", "http");
 
             if (Settings.SFTP && !SFTPEnabled)
                 Log.Warning($"SFTP uploads are switched on in the \"{LogServerSettings.SectionName}\" section, but the node serves no SFTP: " +
@@ -546,7 +673,8 @@ namespace cloud.charging.open.LogServer
             var listeners = new List<String>();
 
             if (UploadServer is not null)
-                listeners.Add($"by HTTP PUT on {(UploadsOverHTTPS ? "https" : "http")}://{LogServerSettings.TextOf(Settings.HTTPListen)}:{Settings.HTTPPort}/<charging station>/<file name>");
+                listeners.Add($"by HTTP PUT on {UploadURL}<charging station>/<file name>" +
+                              (UploadURL.ToString() != UploadListenURL ? $" (listening on {UploadListenURL})" : ""));
 
             if (SftpArea is not null)
                 listeners.Add(SFTPEnabled
@@ -575,9 +703,13 @@ namespace cloud.charging.open.LogServer
                        new JProperty("directory",           Uploads.Directory),
                        new JProperty("http",                UploadServer is not null
                                                                 ? new JObject(
-                                                                      new JProperty("listening",  UploadServer.IsRunning),
-                                                                      new JProperty("url",        $"{(UploadsOverHTTPS ? "https" : "http")}://{LogServerSettings.TextOf(Settings.HTTPListen)}:{Settings.HTTPPort}/"),
-                                                                      new JProperty("tls",        UploadsOverHTTPS),
+                                                                      new JProperty("listening",    UploadServer.IsRunning),
+                                                                      new JProperty("url",          UploadURL.ToString()),
+                                                                      new JProperty("publicURL",    Settings.PublicURL?.ToString()),
+                                                                      new JProperty("listen",       UploadListenURL),
+                                                                      new JProperty("tls",          UploadsOverHTTPS),
+                                                                      new JProperty("certificate",  UploadCertificate?.ToJSON()),
+                                                                      new JProperty("timeout",      (Int64) Settings.HTTPUploadTimeout.TotalSeconds),
                                                                       new JProperty("anonymous",  Settings.AnonymousHTTP),
                                                                       new JProperty("refused",    HTTPUploadsRefused)
                                                                   )

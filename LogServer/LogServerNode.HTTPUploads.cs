@@ -18,6 +18,7 @@
 #region Usings
 
 using System.Text;
+using System.Buffers;
 
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -46,6 +47,10 @@ namespace cloud.charging.open.LogServer
     /// <c>http://CS001:password@logs.example.org:8363/CS001/</c>.
     /// </para>
     /// <para>
+    /// The body is written to the disk as it arrives, and never held in
+    /// memory: an upload costs one buffer, however large the file.
+    /// </para>
+    /// <para>
     /// Signed in with HTTP Basic Auth - or an API key, or a session - as an
     /// account that may upload: the "uploader" role. Without credentials only
     /// where the section says "anonymousHTTP": true. Nothing is served on this
@@ -72,6 +77,12 @@ namespace cloud.charging.open.LogServer
         /// The realm an HTTP client is asked to sign in to.
         /// </summary>
         public const String  UploadRealm        = "OpenChargingCloud LogServer";
+
+        /// <summary>
+        /// How much of an upload is read from the network, and written to the
+        /// disk, at once: what one upload costs in memory, however large it is.
+        /// </summary>
+        private const Int32  StreamBufferSize   = 80 * 1024;
 
         #endregion
 
@@ -179,57 +190,170 @@ namespace cloud.charging.open.LogServer
 
             #endregion
 
-            #region What it brought
+            return Receive(Request, uploader, chargingStation, fileName, from);
 
-            var body = Request.HTTPBody ?? [];
+        }
 
-            if (body.Length == 0)
+        #endregion
+
+        #region (private) Receive(Request, Uploader, ChargingStation, FileName, From)
+
+        /// <summary>
+        /// The body of the PUT written to the disk as it arrives - never held in
+        /// memory, however large - and, once its last byte is there, moved into
+        /// the store. A body that breaks off, is too large or takes too long
+        /// leaves nothing behind.
+        /// </summary>
+        private async Task<HTTPResponse> Receive(HTTPRequest  Request,
+                                                 String       Uploader,
+                                                 String       ChargingStation,
+                                                 String       FileName,
+                                                 String       From)
+        {
+
+            // No body stream: no Content-Length but 0, and no chunks.
+            if (Request.HTTPBodyStream is not Stream body)
             {
                 Interlocked.Increment(ref httpUploadsRefused);
-                return Task.FromResult(Answer(Request, HTTPStatusCode.BadRequest, "The upload is empty: the body of the PUT is the file."));
+                return Answer(Request, HTTPStatusCode.BadRequest, "The upload is empty: the body of the PUT is the file.");
             }
 
-            if (body.LongLength > Settings.MaxFileSize)
-            {
-                Interlocked.Increment(ref httpUploadsRefused);
-                return Task.FromResult(Answer(Request, HTTPStatusCode.RequestEntityTooLarge, $"The file is larger than the {SizeOf(Settings.MaxFileSize)} this log server takes."));
-            }
+            Directory.CreateDirectory(HTTPIncomingDirectory);
 
-            #endregion
+            // Below the uploads, and so on the volume of the store: taking it
+            // in is a rename, however large it is.
+            var part    = Path.Combine(HTTPIncomingDirectory, $"{Guid.NewGuid():N}.part");
+            var size    = 0L;
+            var buffer  = ArrayPool<Byte>.Shared.Rent(StreamBufferSize);
 
             try
             {
 
-                var upload = Uploads.KeepBytes(body,
-                                               UploadProtocol.HTTP,
-                                               uploader,
-                                               chargingStation,
-                                               fileName,
-                                               from,
-                                               Request.ContentType?.ToString(),
-                                               Request.UserAgent);
+                #region Write it to the disk as it arrives
 
-                Log.Notice($"'{uploader}' uploaded '{upload.FileName}' of '{upload.ChargingStation}' by HTTP from {from}: {SizeOf(upload.Size)}, kept as upload {upload.Id}.",
-                           "logserver", "uploads", "http");
+                try
+                {
 
-                return Task.FromResult(
-                           new HTTPResponse.Builder(Request) {
+                    await using var file = new FileStream(part,
+                                                          FileMode.CreateNew,
+                                                          FileAccess.Write,
+                                                          FileShare.None,
+                                                          StreamBufferSize,
+                                                          FileOptions.Asynchronous);
+
+                    Int32 read;
+
+                    while ((read = await body.ReadAsync(buffer.AsMemory(0, StreamBufferSize), Request.CancellationToken)) > 0)
+                    {
+
+                        size += read;
+
+                        // Hermod counts as well - a Content-Length too large is
+                        // refused before the first byte, chunks as they come -
+                        // but what is kept is this log server's to limit.
+                        if (size > Settings.MaxFileSize)
+                            throw new HTTPBodyTooLargeException((UInt64) size, (UInt64) Settings.MaxFileSize);
+
+                        await file.WriteAsync(buffer.AsMemory(0, read), Request.CancellationToken);
+
+                    }
+
+                }
+                catch (HTTPBodyTooLargeException)
+                {
+
+                    Log.Warning($"An HTTP upload of '{FileName}' by '{Uploader}' from {From} was refused: it is larger than the {SizeOf(Settings.MaxFileSize)} this log server takes (\"maxFileSize\").",
+                                "logserver", "uploads", "http");
+
+                    return Refused(HTTPStatusCode.RequestEntityTooLarge, $"The file is larger than the {SizeOf(Settings.MaxFileSize)} this log server takes.");
+
+                }
+                catch (HTTPReadTimeoutException)
+                {
+
+                    Log.Warning($"An HTTP upload of '{FileName}' by '{Uploader}' from {From} was refused: it took longer than the {Settings.HTTPUploadTimeout} an upload may take (\"httpUploadTimeout\"); {SizeOf(size)} had arrived.",
+                                "logserver", "uploads", "http");
+
+                    return Refused(HTTPStatusCode.RequestTimeout, $"The upload took longer than the {Settings.HTTPUploadTimeout} an upload may take; {SizeOf(size)} had arrived.");
+
+                }
+                catch (Exception problem) when (problem is HTTPIncompleteBodyException or HTTPInvalidChunkException or HTTPChunkMetadataTooLargeException or IOException or OperationCanceledException)
+                {
+
+                    Log.Warning($"An HTTP upload of '{FileName}' by '{Uploader}' from {From} broke off after {SizeOf(size)}: {problem.Message}",
+                                "logserver", "uploads", "http");
+
+                    return Refused(HTTPStatusCode.BadRequest, $"The upload broke off after {SizeOf(size)}: {problem.Message}");
+
+                }
+
+                if (size == 0)
+                    return Refused(HTTPStatusCode.BadRequest, "The upload is empty: the body of the PUT is the file.");
+
+                #endregion
+
+                #region ...and into the store
+
+                try
+                {
+
+                    var upload = Uploads.KeepFile(part,
+                                                  UploadProtocol.HTTP,
+                                                  Uploader,
+                                                  ChargingStation,
+                                                  FileName,
+                                                  From,
+                                                  Request.ContentType?.ToString(),
+                                                  Request.UserAgent);
+
+                    Log.Notice($"'{Uploader}' uploaded '{upload.FileName}' of '{upload.ChargingStation}' by HTTP from {From}: {SizeOf(upload.Size)}, kept as upload {upload.Id}.",
+                               "logserver", "uploads", "http");
+
+                    return new HTTPResponse.Builder(Request) {
                                HTTPStatusCode  = HTTPStatusCode.Created,
                                ContentType     = HTTPContentType.Application.JSON_UTF8,
                                Content         = Encoding.UTF8.GetBytes(upload.ToJSON().ToString(Formatting.None)),
                                CacheControl    = "no-store"
-                           }.AsImmutable
-                       );
+                           }.AsImmutable;
+
+                }
+                catch (Exception problem)
+                {
+
+                    Log.Error($"What '{Uploader}' uploaded by HTTP as '{FileName}' could not be kept: {problem.Message}",
+                              "logserver", "uploads", "http");
+
+                    return Answer(Request, HTTPStatusCode.InternalServerError, "The file could not be kept. The log of the log server says why.");
+
+                }
+
+                #endregion
 
             }
-            catch (Exception problem)
+            finally
             {
 
-                Log.Error($"What '{uploader}' uploaded by HTTP as '{fileName}' could not be kept: {problem.Message}",
-                          "logserver", "uploads", "http");
+                ArrayPool<Byte>.Shared.Return(buffer);
 
-                return Task.FromResult(Answer(Request, HTTPStatusCode.InternalServerError, "The file could not be kept. The log of the log server says why."));
+                // Taken into the store, it is no longer there; otherwise it is
+                // what an upload that was refused or broke off left.
+                try
+                {
+                    if (File.Exists(part))
+                        File.Delete(part);
+                }
+                catch (Exception problem) when (problem is IOException or UnauthorizedAccessException)
+                {
+                    Log.Warning($"What an HTTP upload left in '{part}' could not be taken away: {problem.Message}", "logserver", "uploads", "http");
+                }
 
+            }
+
+
+            HTTPResponse Refused(HTTPStatusCode Status, String Error)
+            {
+                Interlocked.Increment(ref httpUploadsRefused);
+                return Answer(Request, Status, Error);
             }
 
         }

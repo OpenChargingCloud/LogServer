@@ -13,7 +13,8 @@ and what its web interface and JSON API offer.
 | | |
 |---|---|
 | `LogServer/LogServerNode.cs` | the node: the `logServer` section, the store, the upload port, the SFTP area |
-| `LogServer/LogServerNode.HTTPUploads.cs` | uploads by HTTP PUT |
+| `LogServer/LogServerNode.HTTPUploads.cs` | uploads by HTTP PUT, written to the disk as they arrive |
+| `LogServer/UploadPortCertificate.cs` | the certificate of the upload port - its own, not the web interface's |
 | `LogServer/LogServerNode.Uploaders.cs` | the accounts in the `uploader` role |
 | `LogServer/Uploads/` | the store of the uploads and their index |
 | `LogServer/HTTPAPI/` | the JSON API below `/api/v1/logServer` |

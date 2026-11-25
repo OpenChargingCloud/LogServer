@@ -23,6 +23,8 @@ using Newtonsoft.Json.Linq;
 
 using org.GraphDefined.Vanaheimr.Hermod;
 
+using cloud.charging.open.protocols.WWCP.Node.Configuration;
+
 #endregion
 
 namespace cloud.charging.open.LogServer
@@ -36,17 +38,21 @@ namespace cloud.charging.open.LogServer
     /// <remarks>
     /// <code>
     /// "logServer": {
-    ///     "directory":      "uploads",
-    ///     "http":           true,
-    ///     "httpListen":     "any",
-    ///     "httpPort":       8363,
-    ///     "anonymousHTTP":  false,
-    ///     "sftp":           true,
-    ///     "maxFileSize":    104857600
+    ///     "directory":          "uploads",
+    ///     "http":               true,
+    ///     "httpListen":         "any",
+    ///     "httpPort":           8363,
+    ///     "tls":                { "certificate": "store" },
+    ///     "publicURL":          "https://logs.example.org:8363/",
+    ///     "httpUploadTimeout":  3600,
+    ///     "anonymousHTTP":      false,
+    ///     "sftp":               true,
+    ///     "maxFileSize":        104857600
     /// }
     /// </code>
-    /// Every key may be left out, and then reads as its default. A directory
-    /// that is not given in full lies beside the configuration file.
+    /// Every key may be left out, and then reads as its default - "tls" and
+    /// "publicURL" as none. A directory, and the files of a certificate, that
+    /// are not given in full lie beside the configuration file.
     /// </remarks>
     public sealed record LogServerSettings
     {
@@ -78,9 +84,28 @@ namespace cloud.charging.open.LogServer
 
         /// <summary>
         /// The largest file that can be taken at all: what one HTTP request body
-        /// of Hermod's may be.
+        /// of Hermod's may be. It is written to the disk as it arrives, and never
+        /// held in memory - the limit is Hermod's count of its bytes.
         /// </summary>
         public const            Int64     LargestMaxFileSize    = Int32.MaxValue;
+
+        /// <summary>
+        /// How long one HTTP upload may take from its first byte to its last,
+        /// unless another time is given: an hour - a diagnostics file of a
+        /// hundred MiB over a mobile line that gives 256 kbit/s takes most of it.
+        /// </summary>
+        public static readonly  TimeSpan  DefaultHTTPUploadTimeout  = TimeSpan.FromHours(1);
+
+        /// <summary>
+        /// The longest an HTTP upload may be given: a day.
+        /// </summary>
+        public static readonly  TimeSpan  LongestHTTPUploadTimeout  = TimeSpan.FromDays(1);
+
+        /// <summary>
+        /// The listener of the node's certificate store a TLS server identity
+        /// may be told it is shown on to be shown on the upload port.
+        /// </summary>
+        public const            String    UploadListener        = "upload";
 
         #endregion
 
@@ -107,6 +132,28 @@ namespace cloud.charging.open.LogServer
         /// The TCP port HTTP uploads are taken on.
         /// </summary>
         public IPPort      HTTPPort        { get; init; } = DefaultHTTPUploadPort;
+
+        /// <summary>
+        /// Whether the upload port speaks TLS, and with which certificate - its
+        /// own, and not the web interface's: out of the node's certificate store
+        /// the TLS server identity for the listener "upload", or one told no
+        /// listener; or a pair of PEM files somebody else keeps up to date. Null
+        /// for plain HTTP.
+        /// </summary>
+        public WebTLSConfiguration?  TLS   { get; init; }
+
+        /// <summary>
+        /// The root of the upload port as charging stations reach it - a name
+        /// rather than the address it listens on, a proxy's port in front, its
+        /// "https" - which the banner, the command line and the web interface
+        /// say. Null where it is to be guessed from where the port listens.
+        /// </summary>
+        public Uri?        PublicURL       { get; init; }
+
+        /// <summary>
+        /// How long one HTTP upload may take from its first byte to its last.
+        /// </summary>
+        public TimeSpan    HTTPUploadTimeout  { get; init; } = DefaultHTTPUploadTimeout;
 
         /// <summary>
         /// Whether an HTTP upload without credentials is taken as well -
@@ -233,6 +280,82 @@ namespace cloud.charging.open.LogServer
 
             #endregion
 
+            #region tls
+
+            // As the "web" section's "tls" is written - a certificate out of the
+            // store, or a pair of PEM files - but without a port of plain HTTP
+            // that redirects: a charging station is told one URL, and follows it.
+            if (json["tls"] is JToken tlsToken && tlsToken.Type != JTokenType.Null)
+            {
+
+                var path = $"{SectionName}.tls";
+
+                if (tlsToken is not JObject tlsJSON)
+                {
+                    Error = $"'{path}' is no JSON object: {{ \"certificate\": \"{WebTLSConfiguration.StoreText}\" }}, or {{ \"certificate\": {{ \"fullchain\": \"<file>\", \"privateKey\": \"<file>\" }} }}.";
+                    return false;
+                }
+
+                if (tlsJSON.ContainsKey("redirectPort"))
+                {
+                    Error = $"'{path}' says 'redirectPort': the upload port redirects nowhere - a charging station is told its URL, and HTTPS in it where the port speaks TLS.";
+                    return false;
+                }
+
+                if (!WebTLSConfiguration.TryParse(tlsJSON, path, out var tls, out var tlsError))
+                {
+                    Error = tlsError;
+                    return false;
+                }
+
+                settings = settings with { TLS = tls };
+
+            }
+
+            #endregion
+
+            #region publicURL
+
+            if (json["publicURL"] is JToken urlToken && urlToken.Type != JTokenType.Null)
+            {
+
+                if (urlToken.Type != JTokenType.String)
+                {
+                    Error = $"'{SectionName}.publicURL' is no text: '{urlToken}'. A URL, as \"https://logs.example.org:8363/\".";
+                    return false;
+                }
+
+                if (!TryParsePublicURL(urlToken.Value<String>(), out var publicURL, out var urlError))
+                {
+                    Error = $"'{SectionName}.publicURL' is no URL a charging station could upload to: {urlError}";
+                    return false;
+                }
+
+                settings = settings with { PublicURL = publicURL };
+
+            }
+
+            #endregion
+
+            #region httpUploadTimeout
+
+            if (!ConfigurationReader.TryReadSeconds(json,
+                                                    "httpUploadTimeout",
+                                                    SectionName,
+                                                    1,
+                                                    LongestHTTPUploadTimeout.TotalSeconds,
+                                                    out var uploadTimeout,
+                                                    out var timeoutError))
+            {
+                Error = timeoutError;
+                return false;
+            }
+
+            if (uploadTimeout is TimeSpan timeout)
+                settings = settings with { HTTPUploadTimeout = timeout };
+
+            #endregion
+
             #region maxFileSize
 
             if (json["maxFileSize"] is JToken sizeToken && sizeToken.Type != JTokenType.Null)
@@ -287,6 +410,45 @@ namespace cloud.charging.open.LogServer
 
         #endregion
 
+        #region (static) TryParsePublicURL(Text, out URL, out Error)
+
+        /// <summary>
+        /// The root of the upload port as charging stations reach it: "http" or
+        /// "https", a host, a port where it is not the scheme's, and a path
+        /// below which "&lt;charging station&gt;/&lt;file name&gt;" follows - a
+        /// proxy's prefix - but no credentials, query or fragment. Always with
+        /// a "/" at its end.
+        /// </summary>
+        public static Boolean TryParsePublicURL(String?                           Text,
+                                                [NotNullWhen(true)]  out Uri?     URL,
+                                                [NotNullWhen(false)] out String?  Error)
+        {
+
+            URL    = null;
+            Error  = null;
+
+            var text = Text?.Trim() ?? "";
+
+            if (!Uri.TryCreate(text, UriKind.Absolute, out var uri) ||
+                uri.Scheme is not ("http" or "https"))
+            {
+                Error = $"'{text}' is no URL of \"http\" or \"https\", as \"https://logs.example.org:8363/\".";
+                return false;
+            }
+
+            if (uri.UserInfo.Length > 0 || uri.Query.Length > 0 || uri.Fragment.Length > 0)
+            {
+                Error = $"'{text}' says credentials, a query or a fragment: the URL is the root a charging station is given, and its credentials are its own.";
+                return false;
+            }
+
+            URL = new Uri(uri.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/");
+            return true;
+
+        }
+
+        #endregion
+
         #region (static) TextOf(Address)
 
         /// <summary>
@@ -308,13 +470,16 @@ namespace cloud.charging.open.LogServer
         public JObject ToJSON()
 
             => new (
-                   new JProperty("directory",      Directory),
-                   new JProperty("http",           HTTP),
-                   new JProperty("httpListen",     TextOf(HTTPListen)),
-                   new JProperty("httpPort",       HTTPPort.ToUInt16()),
-                   new JProperty("anonymousHTTP",  AnonymousHTTP),
-                   new JProperty("sftp",           SFTP),
-                   new JProperty("maxFileSize",    MaxFileSize)
+                   new JProperty("directory",          Directory),
+                   new JProperty("http",               HTTP),
+                   new JProperty("httpListen",         TextOf(HTTPListen)),
+                   new JProperty("httpPort",           HTTPPort.ToUInt16()),
+                   new JProperty("tls",                TLS?.ToJSON()),
+                   new JProperty("publicURL",          PublicURL?.ToString()),
+                   new JProperty("httpUploadTimeout",  (Int64) HTTPUploadTimeout.TotalSeconds),
+                   new JProperty("anonymousHTTP",      AnonymousHTTP),
+                   new JProperty("sftp",               SFTP),
+                   new JProperty("maxFileSize",        MaxFileSize)
                );
 
         #endregion

@@ -292,18 +292,22 @@ namespace cloud.charging.open.LogServer
         #region KeepFile(...)
 
         /// <summary>
-        /// Keep a file that is on the disk already - one SFTP put in place - by
-        /// moving it into the store.
+        /// Keep a file that is on the disk already - one SFTP put in place, one
+        /// an HTTP upload was written to as it arrived - by moving it into the
+        /// store. It has to lie on the same volume as the store, so that the
+        /// move is a rename and not a copy.
         /// </summary>
         public UploadEvent KeepFile(String          File,
                                     UploadProtocol  Protocol,
                                     String          Uploader,
                                     String          ChargingStation,
                                     String          FileName,
-                                    String          RemoteAddress)
+                                    String          RemoteAddress,
+                                    String?         ContentType  = null,
+                                    String?         UserAgent    = null)
 
             => Keep(target => System.IO.File.Move(File, target),
-                    Protocol, Uploader, ChargingStation, FileName, RemoteAddress, null, null);
+                    Protocol, Uploader, ChargingStation, FileName, RemoteAddress, ContentType, UserAgent);
 
         #endregion
 

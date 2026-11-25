@@ -113,12 +113,45 @@ export interface Uploads {
     chargingStations:  string[];
 }
 
+/** The certificate the upload port shows - its own, not the web interface's. */
+export interface UploadPortCertificate {
+    /** "store", or "files". */
+    certificate:  string;
+    fullchain:    string | null;
+    privateKey:   string | null;
+    /** The label of the store's identity shown. */
+    label:        string | null;
+    /** The subject of the certificate shown, or null while there is none. */
+    shows:        string | null;
+    thumbprint:   string | null;
+    notAfter:     string | null;
+    /** Why nothing, or not the newest, is shown. */
+    problem:      string | null;
+}
+
+/** The port HTTP uploads are taken on. */
+export interface UploadPort {
+    listening:    boolean;
+    /** The root charging stations are told to upload below: "publicURL", or a guess. */
+    url:          string;
+    /** What "logServer.publicURL" says, or null where the URL is guessed. */
+    publicURL:    string | null;
+    /** Where the port listens: "http://any:8363/". */
+    listen:       string;
+    tls:          boolean;
+    certificate:  UploadPortCertificate | null;
+    /** How long one upload may take, in seconds. */
+    timeout:      number;
+    anonymous:    boolean;
+    refused:      number;
+}
+
 /** How the log server stands: GET /logServer. */
 export interface LogServerStatus {
     /** The directory the uploads are kept in. */
     directory:         string;
     /** The port HTTP uploads are taken on, or null where they are not. */
-    http:              { listening: boolean; url: string; tls: boolean; anonymous: boolean; refused: number } | null;
+    http:              UploadPort | null;
     /** SFTP on the SSH server, or null where uploads are not taken over it. */
     sftp:              { serving: boolean; port: number | null; path: string; passwords: boolean } | null;
     /** In bytes. */
@@ -137,6 +170,11 @@ export interface LogServerSettings {
     http:           boolean;
     httpListen:     string;
     httpPort:       number;
+    /** As the "web" section's "tls": { certificate: "store" | { fullchain, privateKey } }, or null for plain HTTP. */
+    tls:            { certificate?: string | { fullchain: string; privateKey?: string } } | null;
+    publicURL:      string | null;
+    /** In seconds. */
+    httpUploadTimeout: number;
     anonymousHTTP:  boolean;
     sftp:           boolean;
     maxFileSize:    number;
